@@ -19,6 +19,11 @@
       "mcp_url": "https://fha72713-pa00178.snowflakecomputing.com/api/v2/databases/SNOWFLAKE_LEARNING_DB/schemas/AI_PLATFORM/mcp-servers/BI_MCP_SERVER"
     }
   },
+  "user_roles": {
+    "carla.miquel@mowi.com": ["grdt_user", "bi_user"],
+    "carlamiquelblasco2001@gmail.com": ["grdt_user"],
+    "admin@mowi.com": ["admin"]
+  },
   "mock_users": {
     "user_farming": ["farming_user"],
     "user_grdt": ["grdt_user"],

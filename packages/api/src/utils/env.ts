@@ -15,6 +15,7 @@ const ALLOWED_USER_FIELDS = [
   'email',
   'provider',
   'role',
+  'groups',
   'googleId',
   'facebookId',
   'openidId',
@@ -146,7 +147,14 @@ function processUserPlaceholders(
       continue;
     }
 
-    let replacementValue = fieldValue == null ? '' : String(fieldValue);
+    let replacementValue: string;
+    
+    // Special case for 'groups' field: convert array to comma-separated string
+    if (field === 'groups' && Array.isArray(fieldValue)) {
+      replacementValue = fieldValue.join(',');
+    } else {
+      replacementValue = fieldValue == null ? '' : String(fieldValue);
+    }
 
     // Encode non-ASCII characters when used in headers
     // Fields like name, username, email can contain non-ASCII characters

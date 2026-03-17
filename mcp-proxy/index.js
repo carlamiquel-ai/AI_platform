@@ -1,4 +1,5 @@
-require('dotenv').config({ path: '../.env' });
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 const http = require('http');
 const url = require('url');
 const config = require('./config.json');
@@ -17,16 +18,23 @@ function getAgentFromPath(pathname) {
 
 async function fetchAgentTools(agentId) {
   const agentConfig = config.agents[agentId];
-  const response = await fetch(agentConfig.mcp_url, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${SNOWFLAKE_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 1, params: {} })
-  });
-  const result = await response.json();
-  return result.result?.tools || [];
+  console.log(`[MCP Proxy] Fetching tools from Snowflake for ${agentId}: ${agentConfig.mcp_url}`);
+  try {
+    const response = await fetch(agentConfig.mcp_url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${SNOWFLAKE_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 1, params: {} })
+    });
+    const result = await response.json();
+    console.log(`[MCP Proxy] Snowflake response for ${agentId}:`, JSON.stringify(result).substring(0, 200));
+    return result.result?.tools || [];
+  } catch (err) {
+    console.error(`[MCP Proxy] Error fetching tools for ${agentId}:`, err.message);
+    return [];
+  }
 }
 
 function handleAgentsEndpoint(req, res) {
@@ -62,9 +70,26 @@ async function handleMcpRequest(req, res) {
       }
       const mcpRequest = JSON.parse(body);
       console.log(`[MCP Proxy] ${mcpRequest.method} from ${pathname}`);
-      const roles = getRolesFromRequest(req);
+      console.log(`[MCP Proxy] ALL Headers:`, JSON.stringify(req.headers, null, 2));
+      const roles = await getRolesFromRequest(req);
+      console.log(`[MCP Proxy] Resolved roles: ${roles.join(', ') || '(none)'}`);
       const method = mcpRequest.method;
       const targetAgent = getAgentFromPath(pathname);
+
+      if (method === 'initialize') {
+        const serverName = targetAgent ? `${targetAgent}-proxy` : 'platform-agents-proxy';
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          jsonrpc: '2.0',
+          id: mcpRequest.id,
+          result: {
+            protocolVersion: '2024-11-05',
+            capabilities: { tools: { listChanged: false } },
+            serverInfo: { name: serverName, version: '1.0.0' }
+          }
+        }));
+        return;
+      }
 
       if (targetAgent && !config.agents[targetAgent]) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
