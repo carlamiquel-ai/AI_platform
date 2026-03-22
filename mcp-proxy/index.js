@@ -5,15 +5,66 @@ const url = require('url');
 const config = require('./config.json');
 const { getRolesFromRequest, canAccessAgentByRoles, getAccessibleAgentsByRoles } = require('./rbac');
 const { routeToAgent } = require('./router');
+const { summarizeDocument } = require('./summarize');
 
 const PORT = process.env.MCP_PROXY_PORT || 3099;
 const SNOWFLAKE_API_KEY = process.env.SNOWFLAKE_API_KEY;
 
+const SUMMARIZE_TOOL_DEFINITION = {
+  name: 'summarize-document',
+  description: 'Summarize an uploaded document (PDF, DOCX, TXT). Send the document content as base64-encoded data.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      file_content: {
+        type: 'string',
+        description: 'Base64-encoded file content'
+      },
+      file_name: {
+        type: 'string',
+        description: 'Original file name (used to detect type)'
+      },
+      mime_type: {
+        type: 'string',
+        description: 'MIME type of the file (e.g. application/pdf, text/plain)'
+      },
+      format: {
+        type: 'string',
+        description: 'Summary format: "structured" (detailed) or "brief" (bullet points). Default: structured',
+        enum: ['structured', 'brief']
+      },
+      model: {
+        type: 'string',
+        description: 'Cortex model to use. Default: snowflake-llama-3.3-70b'
+      }
+    },
+    required: ['file_content', 'file_name']
+  }
+};
+
+function getMimeType(fileName, providedMime) {
+  if (providedMime && providedMime !== '') return providedMime;
+  const ext = path.extname(fileName).toLowerCase();
+  const mimeMap = {
+    '.pdf': 'application/pdf',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.doc': 'application/msword',
+    '.txt': 'text/plain',
+    '.csv': 'text/csv',
+    '.md': 'text/markdown'
+  };
+  return mimeMap[ext] || 'text/plain';
+}
+
 function getAgentFromPath(pathname) {
   const match = pathname.match(/^\/([^/]+)/);
   const agent = match ? match[1] : null;
-  if (agent === 'agents') return null;
+  if (agent === 'agents' || agent === 'summarize') return null;
   return agent;
+}
+
+function isSummarizePath(pathname) {
+  return pathname === '/summarize' || pathname.startsWith('/summarize/');
 }
 
 async function fetchAgentTools(agentId) {
@@ -77,7 +128,7 @@ async function handleMcpRequest(req, res) {
       const targetAgent = getAgentFromPath(pathname);
 
       if (method === 'initialize') {
-        const serverName = targetAgent ? `${targetAgent}-proxy` : 'platform-agents-proxy';
+        const serverName = isSummarizePath(pathname) ? 'summarize-proxy' : targetAgent ? `${targetAgent}-proxy` : 'platform-agents-proxy';
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           jsonrpc: '2.0',
@@ -88,6 +139,62 @@ async function handleMcpRequest(req, res) {
             serverInfo: { name: serverName, version: '1.0.0' }
           }
         }));
+        return;
+      }
+
+      // === Summarize endpoint ===
+      if (isSummarizePath(pathname)) {
+        if (method === 'tools/list') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            id: mcpRequest.id,
+            result: { tools: [SUMMARIZE_TOOL_DEFINITION] }
+          }));
+          return;
+        }
+
+        if (method === 'tools/call' && mcpRequest.params?.name === 'summarize-document') {
+          const args = mcpRequest.params.arguments || {};
+          if (!args.file_content || !args.file_name) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              jsonrpc: '2.0',
+              id: mcpRequest.id,
+              result: { content: [{ type: 'text', text: 'Error: file_content and file_name are required.' }], isError: true }
+            }));
+            return;
+          }
+
+          try {
+            const buffer = Buffer.from(args.file_content, 'base64');
+            const mimeType = getMimeType(args.file_name, args.mime_type);
+            console.log(`[Summarize] Processing ${args.file_name} (${mimeType}, ${buffer.length} bytes)`);
+            const summary = await summarizeDocument(buffer, mimeType, SNOWFLAKE_API_KEY, {
+              model: args.model,
+              format: args.format
+            });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              jsonrpc: '2.0',
+              id: mcpRequest.id,
+              result: { content: [{ type: 'text', text: summary }] }
+            }));
+          } catch (err) {
+            console.error('[Summarize Error]', err.message);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              jsonrpc: '2.0',
+              id: mcpRequest.id,
+              result: { content: [{ type: 'text', text: `Summarization error: ${err.message}` }], isError: true }
+            }));
+          }
+          return;
+        }
+
+        // Other methods on /summarize (ping, notifications)
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: mcpRequest.id, result: {} }));
         return;
       }
 
@@ -201,4 +308,5 @@ server.listen(PORT, () => {
   console.log(`  - GET  /agents         → List accessible agents`);
   console.log(`  - POST /               → MCP (all accessible tools)`);
   console.log(`  - POST /{agent}        → MCP (specific agent tools)`);
+  console.log(`  - POST /summarize      → MCP (document summarization via Cortex)`);
 });
