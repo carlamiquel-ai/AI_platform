@@ -98,6 +98,21 @@ async function handleMcpRequest(req, res) {
       }
 
       if (targetAgent && !canAccessAgentByRoles(roles, targetAgent)) {
+        if (method === 'tools/list') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            id: mcpRequest.id,
+            result: {
+              tools: [{
+                name: 'access-denied',
+                description: 'Access denied to this server. Please ask your admin to grant you access.',
+                inputSchema: { type: 'object', properties: {} }
+              }]
+            }
+          }));
+          return;
+        }
         res.writeHead(403, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ jsonrpc: '2.0', id: mcpRequest.id, error: { code: -32600, message: `Access denied to agent: ${targetAgent}` } }));
         return;
