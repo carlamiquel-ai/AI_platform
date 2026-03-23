@@ -36,6 +36,9 @@ async function getRolesFromRequest(req) {
       console.log(`[RBAC] Config roles for ${userEmail}: ${config.user_roles[userEmail.toLowerCase()].join(', ')}`);
       return config.user_roles[userEmail.toLowerCase()];
     }
+
+    console.log(`[RBAC] User ${userEmail} has no groups assigned, defaulting to "new" (no agent access)`);
+    return ['new'];
   }
   
   const userId = req.headers['x-user-id'];

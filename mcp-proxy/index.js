@@ -6,6 +6,7 @@ const config = require('./config.json');
 const { getRolesFromRequest, canAccessAgentByRoles, getAccessibleAgentsByRoles } = require('./rbac');
 const { routeToAgent } = require('./router');
 const { summarizeDocument } = require('./summarize');
+const { renderChartToBase64 } = require('./chart-renderer');
 
 const PORT = process.env.MCP_PROXY_PORT || 3099;
 const SNOWFLAKE_API_KEY = process.env.SNOWFLAKE_API_KEY;
@@ -65,6 +66,65 @@ function getAgentFromPath(pathname) {
 
 function isSummarizePath(pathname) {
   return pathname === '/summarize' || pathname.startsWith('/summarize/');
+}
+
+/**
+ * Post-process a Cortex agent MCP response: extract text/chart blocks,
+ * render Vega-Lite charts to PNG, return clean MCP content.
+ */
+async function postProcessAgentResponse(result) {
+  if (!result?.result?.content || !Array.isArray(result.result.content)) return result;
+
+  const newContent = [];
+  let chartCount = 0;
+
+  for (const item of result.result.content) {
+    if (item.type !== 'text') {
+      newContent.push(item);
+      continue;
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(item.text);
+    } catch {
+      newContent.push(item);
+      continue;
+    }
+
+    if (!parsed.content || !Array.isArray(parsed.content)) {
+      newContent.push(item);
+      continue;
+    }
+
+    for (const block of parsed.content) {
+      if (block.type === 'text' && block.text && block.text.trim()) {
+        newContent.push({ type: 'text', text: block.text });
+      } else if (block.type === 'chart' && block.chart?.chart_spec) {
+        chartCount++;
+        try {
+          const spec = typeof block.chart.chart_spec === 'string'
+            ? JSON.parse(block.chart.chart_spec)
+            : block.chart.chart_spec;
+          console.log(`[Charts] Rendering chart from agent response (${spec.mark || spec.title || 'chart'})`);
+          const base64Png = await renderChartToBase64(spec);
+          console.log(`[Charts] Agent chart rendered (${Math.round(base64Png.length / 1024)}KB)`);
+          newContent.push({ type: 'image', data: base64Png, mimeType: 'image/png' });
+        } catch (err) {
+          console.error('[Charts] Failed to render agent chart:', err.message);
+          newContent.push({ type: 'text', text: `[Chart rendering failed: ${err.message}]` });
+        }
+      } else if (block.type === 'suggested_queries' && Array.isArray(block.suggested_queries)) {
+        const suggestions = block.suggested_queries.map(q => `- ${q.query}`).join('\n');
+        newContent.push({ type: 'text', text: `\nSuggested follow-ups:\n${suggestions}` });
+      }
+    }
+  }
+
+  if (chartCount === 0) return result;
+
+  console.log(`[Charts] Post-processed agent response: ${chartCount} chart(s) rendered`);
+  return { ...result, result: { ...result.result, content: newContent } };
 }
 
 async function fetchAgentTools(agentId) {
@@ -274,7 +334,8 @@ async function handleMcpRequest(req, res) {
         }
 
         const agentRequest = { ...mcpRequest, params: { ...mcpRequest.params, name: actualToolName } };
-        const result = await routeToAgent(agentId, agentRequest, SNOWFLAKE_API_KEY);
+        const rawResult = await routeToAgent(agentId, agentRequest, SNOWFLAKE_API_KEY);
+        const result = await postProcessAgentResponse(rawResult);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
         return;
